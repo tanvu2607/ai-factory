@@ -1,14 +1,13 @@
 name: Yêu cầu Tạo Ứng dụng Mới
 description: Sử dụng form này để ra lệnh cho AI tạo một dự án mới.
 title: "[App Request]: "
-labels: ["ai-request", "pending"]
+labels: ["ai-request"]
 body:
   - type: input
     id: repo_name
     attributes:
-      label: Tên Repository Mới
-      description: Tên sẽ được dùng cho repo dự án mới (ví dụ: my-cool-app).
-      placeholder: my-flutter-notes-app
+      label: Tên Repository mới
+      description: Tên sẽ được dùng cho repo mới (ví dụ: my-cool-app).
     validations:
       required: true
   - type: dropdown
@@ -25,7 +24,6 @@ body:
     id: ai_model
     attributes:
       label: Mô hình Gemini
-      description: Chọn "bộ não" AI để tạo code.
       options:
         - gemini-1.5-flash-latest
         - gemini-1.5-pro-latest
@@ -35,9 +33,9 @@ body:
   - type: textarea
     id: prompt
     attributes:
-      label: Prompt Chi tiết (Bản thiết kế)
+      label: Prompt chi tiết (Bản thiết kế)
       description: Mô tả chi tiết ứng dụng bạn muốn AI tạo ra.
       placeholder: "Hãy tạo một ứng dụng ghi chú đơn giản với chức năng thêm và xóa..."
-      render: text
+      render: "text"
     validations:
       required: true
