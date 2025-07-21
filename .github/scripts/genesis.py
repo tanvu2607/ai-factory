@@ -11,7 +11,6 @@ import google.generativeai as genai
 # I. CẤU HÌNH VÀ LẤY BIẾN MÔI TRƯỜNG
 # ==============================================================================
 print("--- Bước 1: Đang tải cấu hình và biến môi trường ---")
-
 try:
     ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
@@ -63,13 +62,23 @@ jobs:
 # II. CÁC HÀM TIỆN ÍCH
 # ==============================================================================
 
+def github_api_request(method, url, json_data=None):
+    """Hàm chung để gửi yêu cầu đến GitHub API, đã được sửa lỗi."""
+    headers = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
+    try:
+        # Chuyển đổi json_data thành chuỗi JSON nếu nó là một dictionary
+        data_payload = json.dumps(json_data) if json_data else None
+        response = requests.request(method, url, headers=headers, data=data_payload, timeout=60)
+        response.raise_for_status()
+        # Trả về None nếu không có nội dung (ví dụ: status 204)
+        return response.json() if response.status_code != 204 and response.content else None
+    except requests.exceptions.HTTPError as e:
+        print(f"Lỗi API GitHub ({e.response.status_code}) khi gọi {method} {url}: {e.response.text}")
+        raise
+
 def parse_issue_body(body):
-    """Phân tích nội dung của issue (dựa trên form tiếng Anh)."""
+    """Phân tích nội dung của issue và dọn dẹp prompt."""
     print("--- Bước 2: Đang phân tích nội dung yêu cầu từ Issue ---")
-    print("--- Nội dung thô của Issue Body ---")
-    print(body)
-    print("---------------------------------")
-    
     params = {}
     pattern = re.compile(r"### (.*?)\s*\n\s*(.*?)\s*(?=\n###|$)", re.DOTALL)
     
@@ -85,22 +94,21 @@ def parse_issue_body(body):
         "prompt": params.get("detailed_prompt_(the_blueprint)"),
     }
     
-    print("--- Kết quả phân tích ---")
-    print(final_params)
-    print("-------------------------")
-
     if not all(final_params.values()):
         missing = [k for k, v in final_params.items() if not v]
         raise ValueError(f"Không thể phân tích đủ thông tin từ Issue. Các trường bị thiếu: {missing}")
 
+    # Dọn dẹp prompt, loại bỏ các khối markdown
+    final_params['prompt'] = final_params['prompt'].replace("```text", "").replace("```", "").strip()
+    
+    print(f"   - Repo mới: {final_params['repo_name']}")
     return final_params
 
 def call_gemini(user_prompt, language, model_name):
-    """Gọi Gemini để tạo cấu trúc dự án."""
+    # ... (Hàm này giữ nguyên như cũ, không cần sửa) ...
     print(f"--- Bước 3: Đang gọi AI ({model_name}) để tạo code ---")
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel(model_name)
-    
     final_prompt = f"""
     Bạn là một kỹ sư phần mềm chuyên về {language}.
     Dựa trên yêu cầu sau: "{user_prompt}"
@@ -108,66 +116,49 @@ def call_gemini(user_prompt, language, model_name):
     Trả về kết quả dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.
     """
     response = model.generate_content(final_prompt, request_options={'timeout': 300})
-    
     match = re.search(r'```json\s*(\{.*?\})\s*```', response.text, re.DOTALL)
     if not match: match = re.search(r'\{.*\}', response.text, re.DOTALL)
     if not match: raise ValueError(f"AI không trả về JSON hợp lệ. Phản hồi thô:\n{response.text}")
-    
     return json.loads(match.group(0), strict=False)
 
-def github_api_request(method, url, json_data=None):
-    """Hàm chung để gửi yêu cầu đến GitHub API."""
-    headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
-    try:
-        response = requests.request(method, url, headers=headers, json=json_data, timeout=60)
-        response.raise_for_status()
-        return response.json() if response.status_code != 204 and response.content else None
-    except requests.exceptions.HTTPError as e:
-        print(f"Lỗi API GitHub ({e.response.status_code}) khi gọi {method} {url}: {e.response.text}")
-        raise
-
 def create_repo(repo_name):
-    """Tạo một repository mới trên GitHub."""
+    # ... (Hàm này giữ nguyên) ...
     print(f"--- Bước 4: Đang tạo repository mới: {repo_name} ---")
     url = f"{API_BASE_URL}/user/repos"
     data = {"name": repo_name, "private": False, "auto_init": True}
     github_api_request("POST", url, data)
-    print("   - Repository đã được tạo. Đợi 5 giây để GitHub hoàn tất thiết lập...")
     time.sleep(5)
 
 def commit_files_via_api(repo_name, file_tree):
-    """Sử dụng Git Trees API để commit nhiều file cùng lúc."""
+    # ... (Hàm này giữ nguyên) ...
     print(f"--- Bước 5: Đang chuẩn bị và commit {len(file_tree)} file lên repo ---")
-    
     main_ref = github_api_request("GET", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/ref/heads/main")
     latest_commit_sha = main_ref['object']['sha']
     base_tree_sha = github_api_request("GET", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits/{latest_commit_sha}")['tree']['sha']
-
     tree_elements = []
     for path, content in file_tree.items():
-        if not isinstance(content, str): continue # Bỏ qua các giá trị không phải chuỗi
+        if not isinstance(content, str): continue
         blob = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs", {
             "content": content, "encoding": "utf-8"
         })
         tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob['sha']})
-    
     new_tree = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees", {
         "base_tree": base_tree_sha, "tree": tree_elements
     })
-    
     new_commit = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits", {
         "message": "feat: Initial project structure generated by AI Factory",
         "author": COMMIT_AUTHOR, "parents": [latest_commit_sha], "tree": new_tree['sha']
     })
-    
     github_api_request("PATCH", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/refs/heads/main", {"sha": new_commit['sha']})
     print("   - ✅ Đã commit tất cả file thành công!")
+
 
 def comment_on_issue(message):
     """Viết comment phản hồi vào issue gốc."""
     print(f"--- Phản hồi cho người dùng trên Issue #{ISSUE_NUMBER} ---")
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-    github_api_request("POST", url, {"body": message})
+    # Dùng `json=` thay vì `data=` để requests tự xử lý header và encoding
+    github_api_request("POST", url, json_data={"body": message})
 
 # ==============================================================================
 # III. HÀM THỰC THI CHÍNH
@@ -198,11 +189,13 @@ if __name__ == "__main__":
         - **Link Repository:** https://github.com/{REPO_OWNER}/{repo_name}
         - **Hành động tiếp theo:**
           1. **Thêm Secrets:** Để workflow build APK hoạt động, bạn cần vào repo mới, đi tới `Settings > Secrets and variables > Actions` và thêm các secret `RELEASE_KEYSTORE_BASE64`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`.
-          2. **Kích hoạt Workflow:** Workflow sẽ tự chạy sau khi bạn push commit đầu tiên. Bạn cũng có thể vào tab 'Actions' để chạy thủ công.
+          2. **Kích hoạt Workflow:** Workflow sẽ tự chạy sau khi được commit. Bạn cũng có thể vào tab 'Actions' để chạy thủ công.
         """
         comment_on_issue(success_message)
         
     except Exception as e:
-        error_message = f"❌ **Đã xảy ra lỗi nghiêm trọng:**\n\n**Lỗi:**\n```\n{e}\n```\n\nVui lòng kiểm tra lại log của Action và cấu hình."
+        import traceback
+        error_trace = traceback.format_exc()
+        error_message = f"❌ **Đã xảy ra lỗi nghiêm trọng:**\n\n**Lỗi:**\n```\n{e}\n```\n\n**Traceback:**\n```\n{error_trace}\n```"
         comment_on_issue(error_message)
         sys.exit(1)
