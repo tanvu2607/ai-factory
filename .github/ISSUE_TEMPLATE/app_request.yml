@@ -1,41 +1,49 @@
-name: Yêu cầu Tạo Ứng dụng Mới
-description: Sử dụng form này để ra lệnh cho AI tạo một dự án mới.
+name: New Application Request
+description: Use this form to command the AI to generate a new project.
 title: "[App Request]: "
 labels: ["ai-request"]
 body:
   - type: input
     id: repo_name
     attributes:
-      label: Tên Repository mới
-      description: Tên sẽ được dùng cho repo mới (ví dụ: my-cool-app).
+      label: New Repository Name
+      description: The name for the new project folder and GitHub repo (e.g., my-cool-app).
+      placeholder: my-flutter-notes-app
     validations:
       required: true
+
   - type: dropdown
     id: language
     attributes:
-      label: Ngôn ngữ / Framework
+      label: Language or Framework
       options:
         - Flutter
         - Python
+        # Bạn có thể thêm các lựa chọn khác ở đây trong tương lai
+        # - React
+        # - FastAPI
       default: 0
     validations:
       required: true
+
   - type: dropdown
     id: ai_model
     attributes:
-      label: Mô hình Gemini
+      label: Gemini Model
+      description: Choose the AI brain to generate the code.
       options:
         - gemini-1.5-flash-latest
         - gemini-1.5-pro-latest
       default: 0
     validations:
       required: true
+
   - type: textarea
     id: prompt
     attributes:
-      label: Prompt chi tiết (Bản thiết kế)
-      description: Mô tả chi tiết ứng dụng bạn muốn AI tạo ra.
-      placeholder: "Hãy tạo một ứng dụng ghi chú đơn giản với chức năng thêm và xóa..."
+      label: Detailed Prompt (The Blueprint)
+      description: Describe in detail the application you want the AI to create.
+      placeholder: "Create a simple note-taking app with add and delete functionality..."
       render: "text"
     validations:
       required: true
