@@ -1,0 +1,37 @@
+name: AI Project Builder from Issue
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  generate-app:
+    runs-on: ubuntu-latest
+    steps:
+      # Bước 1: Checkout chính code của 'nhà máy' để có các script hỗ trợ
+      - name: Checkout Factory Code
+        uses: actions/checkout@v4
+
+      # Bước 2: Cài đặt Python và các thư viện cần thiết cho Action
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install google-generativeai requests
+
+      # Bước 3: Chạy script chính để xử lý issue
+      - name: Run AI Genesis Script
+        env:
+          # Truyền tất cả các secrets và thông tin từ issue vào script
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }} # Dùng PAT để có đủ quyền
+          GH_USER: ${{ secrets.GH_USER }}
+          COMMIT_EMAIL: ${{ secrets.COMMIT_EMAIL }}
+          COMMIT_NAME: ${{ secrets.COMMIT_NAME }}
+        run: |
+          python .github/scripts/genesis.py
