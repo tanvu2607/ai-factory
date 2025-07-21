@@ -12,7 +12,6 @@ import google.generativeai as genai
 # ==============================================================================
 print("--- Bước 1: Đang tải cấu hình và biến môi trường ---")
 
-# Lấy các biến từ môi trường của GitHub Actions, thoát nếu thiếu
 try:
     ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
@@ -25,64 +24,36 @@ except KeyError as e:
     print(f"❌ LỖI NGHIÊM TRỌNG: Thiếu biến môi trường bắt buộc: {e}")
     sys.exit(1)
 
-# Thiết lập các hằng số
 COMMIT_AUTHOR = {"name": COMMIT_NAME, "email": COMMIT_EMAIL}
 API_BASE_URL = "https://api.github.com"
 
-# Nội dung workflow "chuẩn" cho Flutter
 FLUTTER_WORKFLOW_CONTENT = r"""
 name: Build and Release Flutter APK
-
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-
+on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-
-      - name: Get dependencies
-        run: flutter pub get
-
-      - name: Create required Android directories
-        run: mkdir -p android/app
-
-      # LƯU Ý: Người dùng cần tự thêm các secret này vào repo mới được tạo
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin' }
+      - uses: subosito/flutter-action@v2
+        with: { channel: 'stable' }
+      - run: flutter pub get
+      - run: mkdir -p android/app
       - name: Decode Keystore
-        run: |
-          echo "Decoding keystore..."
-          echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
-        
+        run: echo "${{ secrets.RELEASE_KEYSTORE_BASE64 }}" | base64 --decode > android/app/upload-keystore.jks
       - name: Create key.properties
         run: |
-          echo "Creating key.properties..."
           echo "storePassword=${{ secrets.RELEASE_KEYSTORE_PASSWORD }}" > android/key.properties
           echo "keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}" >> android/key.properties
           echo "keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}" >> android/key.properties
           echo "storeFile=../app/upload-keystore.jks" >> android/key.properties
-
       - name: Build APK
         run: |
           flutter clean
           flutter build apk --release
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
@@ -93,20 +64,36 @@ jobs:
 # ==============================================================================
 
 def parse_issue_body(body):
-    """Phân tích nội dung của issue để lấy ra các tham số."""
+    """Phân tích nội dung của issue (dựa trên form tiếng Anh)."""
     print("--- Bước 2: Đang phân tích nội dung yêu cầu từ Issue ---")
+    print("--- Nội dung thô của Issue Body ---")
+    print(body)
+    print("---------------------------------")
+    
     params = {}
-    fields = ["repo_name", "language", "ai_model", "prompt"]
-    for field in fields:
-        match = re.search(rf"### {field}\s*\n\s*(.*?)\s*(?=\n###|$)", body, re.DOTALL)
-        if match:
-            params[field] = match.group(1).strip()
-    if not all(params.get(f) for f in fields):
-        raise ValueError("Không thể phân tích đủ thông tin từ Issue. Hãy chắc chắn form được điền đầy đủ.")
-    print(f"   - Repo mới: {params['repo_name']}")
-    print(f"   - Ngôn ngữ: {params['language']}")
-    print(f"   - Model AI: {params['ai_model']}")
-    return params
+    pattern = re.compile(r"### (.*?)\s*\n\s*(.*?)\s*(?=\n###|$)", re.DOTALL)
+    
+    for match in pattern.finditer(body):
+        key = match.group(1).strip().lower().replace(' ', '_')
+        value = match.group(2).strip()
+        params[key] = value
+
+    final_params = {
+        "repo_name": params.get("new_repository_name"),
+        "language": params.get("language_or_framework"),
+        "ai_model": params.get("gemini_model"),
+        "prompt": params.get("detailed_prompt_(the_blueprint)"),
+    }
+    
+    print("--- Kết quả phân tích ---")
+    print(final_params)
+    print("-------------------------")
+
+    if not all(final_params.values()):
+        missing = [k for k, v in final_params.items() if not v]
+        raise ValueError(f"Không thể phân tích đủ thông tin từ Issue. Các trường bị thiếu: {missing}")
+
+    return final_params
 
 def call_gemini(user_prompt, language, model_name):
     """Gọi Gemini để tạo cấu trúc dự án."""
@@ -132,7 +119,7 @@ def github_api_request(method, url, json_data=None):
     """Hàm chung để gửi yêu cầu đến GitHub API."""
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     try:
-        response = requests.request(method, url, headers=headers, json=json_data)
+        response = requests.request(method, url, headers=headers, json=json_data, timeout=60)
         response.raise_for_status()
         return response.json() if response.status_code != 204 and response.content else None
     except requests.exceptions.HTTPError as e:
@@ -152,37 +139,28 @@ def commit_files_via_api(repo_name, file_tree):
     """Sử dụng Git Trees API để commit nhiều file cùng lúc."""
     print(f"--- Bước 5: Đang chuẩn bị và commit {len(file_tree)} file lên repo ---")
     
-    # Lấy commit SHA mới nhất của nhánh main
-    main_ref_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/ref/heads/main"
-    main_ref = github_api_request("GET", main_ref_url)
+    main_ref = github_api_request("GET", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/ref/heads/main")
     latest_commit_sha = main_ref['object']['sha']
-    
-    # Lấy tree SHA của commit đó
-    commit_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits/{latest_commit_sha}"
-    base_tree_sha = github_api_request("GET", commit_url)['tree']['sha']
+    base_tree_sha = github_api_request("GET", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits/{latest_commit_sha}")['tree']['sha']
 
-    # Tạo các "blob" cho từng file
     tree_elements = []
     for path, content in file_tree.items():
-        blob_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs"
-        blob = github_api_request("POST", blob_url, {"content": content, "encoding": "utf-8"})
+        if not isinstance(content, str): continue # Bỏ qua các giá trị không phải chuỗi
+        blob = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs", {
+            "content": content, "encoding": "utf-8"
+        })
         tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob['sha']})
     
-    # Tạo một "tree" mới từ các blob
-    tree_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees"
-    new_tree = github_api_request("POST", tree_url, {"base_tree": base_tree_sha, "tree": tree_elements})
-    
-    # Tạo "commit" mới
-    new_commit_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits"
-    new_commit = github_api_request("POST", new_commit_url, {
-        "message": "feat: Initial project structure generated by AI Factory",
-        "author": COMMIT_AUTHOR,
-        "parents": [latest_commit_sha],
-        "tree": new_tree['sha']
+    new_tree = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees", {
+        "base_tree": base_tree_sha, "tree": tree_elements
     })
     
-    # Cập nhật nhánh main để trỏ vào commit mới
-    github_api_request("PATCH", main_ref_url, {"sha": new_commit['sha']})
+    new_commit = github_api_request("POST", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits", {
+        "message": "feat: Initial project structure generated by AI Factory",
+        "author": COMMIT_AUTHOR, "parents": [latest_commit_sha], "tree": new_tree['sha']
+    })
+    
+    github_api_request("PATCH", f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/refs/heads/main", {"sha": new_commit['sha']})
     print("   - ✅ Đã commit tất cả file thành công!")
 
 def comment_on_issue(message):
@@ -206,7 +184,6 @@ if __name__ == "__main__":
         
         file_tree = call_gemini(user_prompt, language, ai_model)
         
-        # Thêm workflow build APK nếu là dự án Flutter
         if language.lower() == 'flutter':
             print("   - Dự án Flutter, đang thêm workflow build APK...")
             file_tree[".github/workflows/build_and_release.yml"] = FLUTTER_WORKFLOW_CONTENT
@@ -226,8 +203,6 @@ if __name__ == "__main__":
         comment_on_issue(success_message)
         
     except Exception as e:
-        # Báo cáo lỗi chi tiết về lại issue
-        error_message = f"❌ **Đã xảy ra lỗi nghiêm trọng trong quá trình tự động hóa:**\n\n**Lỗi:**\n```\n{e}\n```\n\nVui lòng kiểm tra lại prompt hoặc cấu hình."
+        error_message = f"❌ **Đã xảy ra lỗi nghiêm trọng:**\n\n**Lỗi:**\n```\n{e}\n```\n\nVui lòng kiểm tra lại log của Action và cấu hình."
         comment_on_issue(error_message)
-        # Báo lỗi cho GitHub Actions để biết lần chạy thất bại
         sys.exit(1)
