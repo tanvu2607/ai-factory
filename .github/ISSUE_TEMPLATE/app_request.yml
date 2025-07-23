@@ -19,9 +19,6 @@ body:
       options:
         - Flutter
         - Python
-        # Bạn có thể thêm các lựa chọn khác ở đây trong tương lai
-        # - React
-        # - FastAPI
       default: 0
     validations:
       required: true
