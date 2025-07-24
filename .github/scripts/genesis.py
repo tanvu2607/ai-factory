@@ -20,8 +20,13 @@ try:
     REPO_OWNER = os.environ["GH_USER"]
     COMMIT_EMAIL = os.environ["COMMIT_EMAIL"]
     COMMIT_NAME = os.environ["COMMIT_NAME"]
+    # Lấy các secret của keystore từ môi trường
+    RELEASE_KEYSTORE_BASE64 = os.environ["RELEASE_KEYSTORE_BASE64"]
+    RELEASE_KEYSTORE_PASSWORD = os.environ["RELEASE_KEYSTORE_PASSWORD"]
+    RELEASE_KEY_ALIAS = os.environ["RELEASE_KEY_ALIAS"]
+    RELEASE_KEY_PASSWORD = os.environ["RELEASE_KEY_PASSWORD"]
 except KeyError as e:
-    print(f"❌ LỖI: Thiếu biến môi trường: {e}")
+    print(f"❌ LỖI: Thiếu biến môi trường hoặc secret: {e}")
     sys.exit(1)
 
 COMMIT_AUTHOR = {"name": COMMIT_NAME, "email": COMMIT_EMAIL}
@@ -80,7 +85,7 @@ jobs:
 
 def post_issue_comment(message):
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-    requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
+    requests.post(url, headers=HEADERS, json={"body": message})
 
 def parse_issue_body(body):
     print("--- [Genesis] Bước 2: Đang phân tích yêu cầu ---")
@@ -110,20 +115,20 @@ def extract_and_clean_json(text):
     return json_str
 
 def call_gemini_for_code(user_prompt, language, model_name):
-    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) - Lần thử 1 ---")
-    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh. Trả về dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
+    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) ---")
+    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh. Trả về JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
     raw_response = ""
     json_str = ""
     try:
         raw_response = _call_gemini_raw(final_prompt, model_name)
         json_str = extract_and_clean_json(raw_response)
         parsed_json = json.loads(json_str)
-        print("   - ✅ AI đã tạo code và JSON hợp lệ ngay lần đầu.")
+        print("   - ✅ AI đã tạo JSON hợp lệ lần đầu.")
         return parsed_json
     except (json.JSONDecodeError, ValueError) as e:
-        post_issue_comment(f"⚠️ **Cảnh báo:** AI đã trả về JSON không hợp lệ (Lỗi: {e}). Bắt đầu vòng lặp tự sửa lỗi...")
-        repair_prompt = f"Phản hồi trước của bạn đã gây ra lỗi parse JSON. LỖI: {e}\nCHUỖI JSON BỊ LỖI:\n---\n{json_str or raw_response}\n---\nNHIỆM VỤ: Hãy sửa lại CHUỖI JSON trên để nó hoàn toàn hợp lệ. Chỉ trả về DUY NHẤT khối JSON đã được sửa."
-        print(f"--- [Genesis] Đang gọi AI ({model_name}) - Lần thử 2 (Sửa lỗi) ---")
+        post_issue_comment(f"⚠️ **Cảnh báo:** AI đã trả về JSON không hợp lệ. Bắt đầu tự sửa lỗi...")
+        repair_prompt = f"Phản hồi trước của bạn gây lỗi parse JSON. LỖI: {e}\nJSON BỊ LỖI:\n---\n{json_str or raw_response}\n---\nNHIỆM VỤ: Sửa lại CHUỖI JSON trên. Chỉ trả về DUY NHẤT khối JSON đã sửa."
+        print(f"--- [Genesis] Đang gọi AI - Lần 2 (Sửa lỗi) ---")
         repaired_response = ""
         try:
             repaired_response = _call_gemini_raw(repair_prompt, model_name)
@@ -133,9 +138,35 @@ def call_gemini_for_code(user_prompt, language, model_name):
             post_issue_comment("✅ **Thông tin:** Vòng lặp tự sửa lỗi JSON đã thành công.")
             return parsed_json
         except Exception as final_e:
-            raise Exception(f"AI không thể tự sửa lỗi JSON.\nLỗi cuối cùng: {final_e}\nPhản hồi sửa lỗi thô: {repaired_response}")
+            raise Exception(f"AI không thể tự sửa lỗi JSON. Lỗi cuối: {final_e}")
     except Exception as e:
         raise e
+
+def upload_secrets_to_repo(repo_name):
+    print(f"--- 🔑 Đang tự động thêm secrets vào repo {repo_name} ---")
+    from nacl import encoding, public
+    
+    secrets_to_upload = {
+        "RELEASE_KEYSTORE_BASE64": RELEASE_KEYSTORE_BASE64,
+        "RELEASE_KEYSTORE_PASSWORD": RELEASE_KEYSTORE_PASSWORD,
+        "RELEASE_KEY_ALIAS": RELEASE_KEY_ALIAS,
+        "RELEASE_KEY_PASSWORD": RELEASE_KEY_PASSWORD,
+        "GH_PAT_FOR_FACTORY": GITHUB_TOKEN
+    }
+    
+    key_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/actions/secrets/public-key"
+    key_data = requests.get(key_url, headers=HEADERS).json()
+    public_key = public.PublicKey(key_data['key'], encoding.Base64Encoder())
+    sealed_box = public.SealedBox(public_key)
+    
+    for name, value in secrets_to_upload.items():
+        print(f"   - 🔐 Đang tải lên secret: {name}")
+        encrypted = sealed_box.encrypt(value.encode("utf-8"))
+        b64_encrypted = base64.b64encode(encrypted).decode("utf-8")
+        secret_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/actions/secrets/{name}"
+        requests.put(secret_url, headers=HEADERS, json={"encrypted_value": b64_encrypted, "key_id": key_data['key_id']}).raise_for_status()
+    
+    print(f"   - ✅ Đã thêm thành công {len(secrets_to_upload)} secrets.")
 
 def create_and_commit_project(repo_name, file_tree):
     print(f"--- [Genesis] Bước 4: Đang tạo repo và commit file ---")
@@ -154,10 +185,8 @@ def create_and_commit_project(repo_name, file_tree):
         tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
         
     new_tree_sha = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees", headers=HEADERS, json={"base_tree": base_tree_sha, "tree": tree_elements}).json()['sha']
-    
     commit_data = {"message": "feat: Initial project structure by AI Factory", "author": COMMIT_AUTHOR, "parents": [latest_commit_sha], "tree": new_tree_sha}
     new_commit_sha = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits", headers=HEADERS, json=commit_data).json()['sha']
-    
     requests.patch(ref_url, headers=HEADERS, json={"sha": new_commit_sha}).raise_for_status()
     print("   - ✅ Đã commit tất cả file thành công!")
 
@@ -168,23 +197,24 @@ if __name__ == "__main__":
     try:
         params = parse_issue_body(ISSUE_BODY)
         repo_name, language, ai_model, user_prompt = params.values()
+        
         post_issue_comment(f"✅ Đã nhận yêu cầu cho repo `{repo_name}`. Bắt đầu gọi AI ({ai_model})...")
+        
         file_tree = call_gemini_for_code(user_prompt, language, ai_model)
         
         if language.lower() == 'flutter':
-            print("   - Dự án Flutter, đang thêm workflow build APK...")
             file_tree[".github/workflows/build_and_release.yml"] = FLUTTER_WORKFLOW_CONTENT
-            post_issue_comment("⚙️ Đã thêm workflow tự động build và tự sửa lỗi.")
+            post_issue_comment("⚙️ Đã thêm workflow build & self-heal.")
         
         create_and_commit_project(repo_name, file_tree)
+        upload_secrets_to_repo(repo_name) # <-- GỌI HÀM MỚI
         
         success_message = f"""
-        🎉 **Dự án `{repo_name}` đã được tạo thành công!**
+        🎉 **Dự án `{repo_name}` đã được tạo và cấu hình hoàn chỉnh!**
 
         - **Link Repository:** https://github.com/{REPO_OWNER}/{repo_name}
-        - **Hành động tiếp theo:**
-          1. **Thêm Secrets:** Để workflow build APK hoạt động, bạn cần vào repo mới, đi tới `Settings > Secrets and variables > Actions` và thêm các secret `RELEASE_KEYSTORE_BASE64`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`, và **quan trọng là `GH_PAT_FOR_FACTORY`** (dán chính PAT của `ai-factory`).
-          2. **Kích hoạt Workflow:** Workflow sẽ tự chạy sau khi được commit.
+        - **Trạng thái:** Tất cả secrets cần thiết đã được tự động thêm.
+        - **Hành động:** Workflow build APK đã được kích hoạt. Bạn có thể vào tab 'Actions' của repo mới để theo dõi và tải về sản phẩm.
         """
         post_issue_comment(success_message)
         
