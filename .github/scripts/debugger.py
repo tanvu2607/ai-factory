@@ -6,183 +6,137 @@ import time
 import sys
 import requests
 import google.generativeai as genai
-from zipfile import ZipFile
-from io import BytesIO
+import zipfile
+import io
+import traceback
 
 # ==============================================================================
-# I. CẤU HÌNH VÀ LẤY BIẾN MÔI TRƯỜNG
+# I. CẤU HÌNH
 # ==============================================================================
-print("--- 🤖 AI Auto-Debugger Initialized ---")
+print("--- 🤖 AI Auto-Debugger v1.0 Initializing ---")
 try:
-    ISSUE_BODY = os.environ["ISSUE_BODY"]
+    ISSUE_BODY = os.environ.get("ISSUE_BODY", "") # Lấy từ trigger issue
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
+    
+    # Lấy từ trigger workflow_dispatch
+    REPO_TO_FIX = os.environ.get("REPO_TO_FIX")
+    FAILED_RUN_ID = os.environ.get("FAILED_RUN_ID")
+    DEBUG_ATTEMPT = int(os.environ.get("DEBUG_ATTEMPT", 1))
+    
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
     GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
     REPO_OWNER = os.environ["GH_USER"]
-    COMMIT_AUTHOR = {"name": os.environ["COMMIT_NAME"], "email": os.environ["COMMIT_EMAIL"]}
-except KeyError as e:
-    print(f"❌ LỖI NGHIÊM TRỌNG: Thiếu biến môi trường: {e}")
+    COMMIT_EMAIL = os.environ["COMMIT_EMAIL"]
+    COMMIT_NAME = os.environ["COMMIT_NAME"]
+except (KeyError, ValueError) as e:
+    print(f"❌ LỖI: Thiếu biến môi trường: {e}")
     sys.exit(1)
 
+COMMIT_AUTHOR = {"name": COMMIT_NAME, "email": COMMIT_EMAIL}
 API_BASE_URL = "https://api.github.com"
 HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 genai.configure(api_key=GEMINI_API_KEY)
+MAX_DEBUG_ATTEMPTS = 3
 
 # ==============================================================================
 # II. CÁC HÀM TIỆN ÍCH
 # ==============================================================================
-
 def post_issue_comment(message):
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-    try:
-        requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
-    except Exception as e:
-        print(f"⚠️ Cảnh báo: Không thể comment lên issue: {e}")
+    requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
 
-def parse_report_issue(body):
-    print("--- 🔎 Đang phân tích báo cáo lỗi ---")
-    repo_match = re.search(r"- \*\*Repo:\*\* `(.*?)`", body)
-    run_url_match = re.search(r"- \*\*Workflow Run URL:\*\* (.*)", body)
-    
+def parse_bug_report(body):
+    print("--- 🕵️  Đang phân tích báo cáo lỗi ---")
+    repo_match = re.search(r"- \*\*Repo:\*\*\s*`(.+?)`", body)
+    run_url_match = re.search(r"- \*\*Workflow Run URL:\*\*\s*(https\S+)", body)
     if not repo_match or not run_url_match:
-        raise ValueError("Issue báo lỗi không chứa đủ thông tin (Repo, Workflow Run URL).")
-    
-    repo_full_name = repo_match.group(1)
-    run_url = run_url_match.group(1)
-    run_id = run_url.split('/')[-1]
-    
-    print(f"   - Repo bị lỗi: {repo_full_name}")
-    print(f"   - Run ID: {run_id}")
-    return repo_full_name, run_id
+        raise ValueError("Không thể trích xuất Repo và Run URL từ báo cáo lỗi.")
+    repo_name = repo_match.group(1)
+    run_id = run_url_match.group(1).split('/')[-1]
+    return repo_name, run_id
 
-def get_failed_job_log(repo_full_name, run_id):
-    print("--- 📥 Đang tải log lỗi từ workflow ---")
-    jobs_url = f"{API_BASE_URL}/repos/{repo_full_name}/actions/runs/{run_id}/jobs"
-    jobs = requests.get(jobs_url, headers=HEADERS).json()['jobs']
-    
-    for job in jobs:
-        if job['conclusion'] == 'failure':
-            log_url = job['logs_url']
-            print(f"   - Tìm thấy job thất bại: {job['name']}. Đang tải log...")
-            # GitHub chuyển hướng đến một URL khác, cần cho phép chuyển hướng
-            log_content = requests.get(log_url, headers=HEADERS, allow_redirects=True).text
-            # Chỉ lấy 150 dòng cuối để không làm prompt quá dài
-            short_log = "\n".join(log_content.splitlines()[-150:])
-            return short_log
-    
-    raise ValueError("Không tìm thấy job nào thất bại trong workflow run.")
+def get_failed_job_log(repo_name, run_id):
+    print(f"--- 📥 Đang tải log lỗi từ Run ID: {run_id} ---")
+    logs_url = f"{API_BASE_URL}/repos/{repo_name}/actions/runs/{run_id}/logs"
+    for i in range(3): # Thử lại 3 lần
+        response = requests.get(logs_url, headers=HEADERS, stream=True, timeout=60)
+        if response.status_code == 200: break
+        print(f"Log chưa sẵn sàng, đợi 10 giây... (lần {i+1})")
+        time.sleep(10)
+    response.raise_for_status()
+    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+        log_file_name = next((name for name in z.namelist() if 'build' in name and name.endswith('.txt')), z.namelist()[0])
+        with z.open(log_file_name) as f:
+            log_content = f.read().decode('utf-8', errors='ignore')
+    return "\n".join(log_content.splitlines()[-200:])
 
-def get_file_content(repo_full_name, file_path):
-    print(f"--- 📥 Đang tải nội dung file: {file_path} ---")
-    content_url = f"{API_BASE_URL}/repos/{repo_full_name}/contents/{file_path}"
-    response = requests.get(content_url, headers=HEADERS).json()
-    return base64.b64decode(response['content']).decode('utf-8'), response['sha']
+def get_file_content(repo_name, file_path):
+    print(f"--- 📄 Đang đọc nội dung file: {file_path} ---")
+    try:
+        url = f"{API_BASE_URL}/repos/{repo_name}/contents/{file_path}"
+        response = requests.get(url, headers=HEADERS, timeout=30).json()
+        return base64.b64decode(response['content']).decode('utf-8'), response['sha']
+    except Exception: return None, None
 
-def call_gemini_for_fix(error_log, code_files):
-    print("--- 🧠 Đang yêu cầu Gemini phân tích và sửa lỗi ---")
-    model = genai.GenerativeModel("gemini-1.5-pro-latest") # Dùng model mạnh nhất để gỡ lỗi
-    
-    files_str = "\n".join([f"--- FILE: {path} ---\n```dart\n{content}\n```" for path, (content, _) in code_files.items()])
-
-    prompt = f"""
-    Bạn là một Kỹ sư Flutter Senior chuyên gỡ lỗi. Một quy trình build đã thất bại.
-    
-    **LOG LỖI (150 DÒNG CUỐI):**
-    ```
-    {error_log}
-    ```
-
-    **CÁC FILE CODE LIÊN QUAN:**
-    {files_str}
-
-    **NHIỆM VỤ:**
-    1.  Phân tích log lỗi và code để tìm ra nguyên nhân gốc rễ.
-    2.  Viết lại **TOÀN BỘ NỘI DUNG** của file cần sửa để khắc phục lỗi.
-    3.  Chỉ trả về kết quả dưới dạng một đối tượng JSON duy nhất theo định dạng sau. **Không giải thích gì thêm.**
-
-    **ĐỊNH DẠNG JSON:**
-    ```json
-    {{
-      "analysis": "Nguyên nhân lỗi là do thư viện `non_existent_package` không tồn tại trong `pubspec.yaml`.",
-      "file_to_fix": "pubspec.yaml",
-      "corrected_code": "name: my_app\ndescription: A new Flutter project.\n...\ndependencies:\n  flutter:\n    sdk: flutter\n  # Đã xóa bỏ thư viện không tồn tại\n"
-    }}
-    ```
-    """
-    response = model.generate_content(prompt, request_options={'timeout': 400})
+def call_gemini_for_fix(error_log, files_content):
+    print("--- 🧠 Đang gửi thông tin cho Gemini Pro để phân tích và sửa lỗi ---")
+    context_files = "".join([f"\n\n--- Content of `{path}` ---\n```\n{content}\n```" for path, content in files_content.items() if content])
+    debug_prompt = f"Một build Flutter đã thất bại. Phân tích log và code để sửa lỗi.\n\n--- LOG LỖI ---\n```\n{error_log}\n```\n{context_files}\n\n**NHIỆM VỤ:**\n1. Phân tích nguyên nhân.\n2. Viết lại TOÀN BỘ nội dung của file cần sửa.\n3. Trả về MỘT JSON duy nhất có cấu trúc: `{{\"analysis\": \"...\", \"file_to_patch\": \"...\", \"corrected_code\": \"...\", \"commit_message\": \"...\"}}`. Nếu không sửa được, `file_to_patch` là `null`."
+    model = genai.GenerativeModel("gemini-1.5-pro-latest")
+    response = model.generate_content(debug_prompt, request_options={'timeout': 400})
     match = re.search(r'\{.*\}', response.text, re.DOTALL)
-    if not match: raise ValueError(f"AI không trả về JSON sửa lỗi hợp lệ.")
-    
-    print("   - ✅ Gemini đã đề xuất bản vá.")
+    if not match: raise ValueError(f"AI Debugger không trả về JSON hợp lệ.")
     return json.loads(match.group(0), strict=False)
 
-def commit_fix(repo_full_name, file_path, new_content, old_sha, commit_message):
-    print(f"--- ⬆️  Đang commit bản vá cho file {file_path} ---")
-    url = f"{API_BASE_URL}/repos/{repo_full_name}/contents/{file_path}"
-    data = {
-        "message": commit_message,
-        "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'),
-        "sha": old_sha,
-        "author": COMMIT_AUTHOR
-    }
+def apply_patch(repo_name, file_path, new_content, commit_message, current_sha):
+    print(f"--- 🩹 Đang áp dụng bản vá cho file: {file_path} ---")
+    url = f"{API_BASE_URL}/repos/{repo_name}/contents/{file_path}"
+    data = {"message": commit_message, "content": base64.b64encode(new_content.encode('utf-8')).decode('utf-8'), "sha": current_sha, "author": COMMIT_AUTHOR}
     requests.put(url, headers=HEADERS, json=data).raise_for_status()
-    print("   - ✅ Đã commit bản vá thành công!")
+    print("   - ✅ Bản vá đã được commit!")
 
+def re_trigger_fix(repo_to_fix, failed_run_id, next_attempt):
+     print(f"--- 🔁 Đang kích hoạt lại vòng sửa lỗi (lần {next_attempt}) ---")
+     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/actions/workflows/auto_debugger.yml/dispatches"
+     data = {'ref': 'main', 'inputs': {'failed_run_id': failed_run_id, 'repo_to_fix': repo_to_fix, 'debug_attempt': str(next_attempt)}}
+     requests.post(url, headers=HEADERS, json=data).raise_for_status()
+     
 # ==============================================================================
 # III. HÀM THỰC THI CHÍNH
 # ==============================================================================
 if __name__ == "__main__":
     try:
-        repo_to_fix, run_id = parse_report_issue(ISSUE_BODY)
+        repo_to_fix, failed_run_id = REPO_TO_FIX, FAILED_RUN_ID
+        if not repo_to_fix or not failed_run_id: # Lấy từ issue nếu trigger thủ công bị thiếu
+             repo_to_fix, failed_run_id = parse_bug_report(ISSUE_BODY)
+
+        post_issue_comment(f"✅ **AI Debugger đã bắt đầu làm việc** trên repo `{repo_to_fix}` (Lần thử #{DEBUG_ATTEMPT}).")
         
-        # Đếm số lần thử (cơ chế an toàn)
-        issue_comments_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-        comments = requests.get(issue_comments_url, headers=HEADERS).json()
-        attempt_count = sum(1 for c in comments if "AI Auto-Debugger Attempt" in c.get('body', ''))
+        if DEBUG_ATTEMPT > MAX_DEBUG_ATTEMPTS:
+            post_issue_comment(f"🚨 Đã đạt giới hạn {MAX_DEBUG_ATTEMPTS} lần sửa lỗi. Dừng lại.")
+            sys.exit(1)
         
-        if attempt_count >= 2:
-            post_issue_comment("❌ **Đã thử sửa lỗi 2 lần và thất bại.** Dừng lại để con người can thiệp.")
-            sys.exit(0)
-
-        post_issue_comment(f"✅ **AI Auto-Debugger Attempt #{attempt_count + 1}**\n\nBắt đầu quy trình phân tích và sửa lỗi tự động...")
-
-        error_log = get_failed_job_log(repo_to_fix, run_id)
+        log = get_failed_job_log(repo_to_fix, failed_run_id)
         
-        # Giả định lỗi thường ở pubspec.yaml hoặc lib/main.dart
-        files_to_analyze = {}
-        try:
-            pubspec_content, pubspec_sha = get_file_content(repo_to_fix, "pubspec.yaml")
-            files_to_analyze["pubspec.yaml"] = (pubspec_content, pubspec_sha)
-        except Exception: pass # Bỏ qua nếu file không tồn tại
-
-        try:
-            main_dart_content, main_dart_sha = get_file_content(repo_to_fix, "lib/main.dart")
-            files_to_analyze["lib/main.dart"] = (main_dart_content, main_dart_sha)
-        except Exception: pass
-
-        if not files_to_analyze:
-            raise ValueError("Không thể tải về bất kỳ file nào để phân tích.")
-
-        fix_suggestion = call_gemini_for_fix(error_log, files_to_analyze)
+        files_to_read = ["pubspec.yaml", "lib/main.dart"]
+        files_content_map = {path: get_file_content(repo_to_fix, path) for path in files_to_read}
+            
+        fix_suggestion = call_gemini_for_fix(log, {p: c[0] for p, c in files_content_map.items()})
         
-        file_to_fix = fix_suggestion.get("file_to_fix")
-        corrected_code = fix_suggestion.get("corrected_code")
-        analysis = fix_suggestion.get("analysis")
-
-        if not file_to_fix or not corrected_code:
-            raise ValueError("AI không trả về đầy đủ thông tin để sửa lỗi (file_to_fix, corrected_code).")
-
-        post_issue_comment(f"🧠 **Phân tích của AI:** {analysis}\n\nĐang áp dụng bản vá cho file `{file_to_fix}`...")
-        
-        _, old_sha = files_to_analyze[file_to_fix]
-        commit_message = f"fix(ai): Attempt to fix build error: {analysis}"
-        commit_fix(repo_to_fix, file_to_fix, corrected_code, old_sha, commit_message)
-        
-        post_issue_comment("✅ **Đã áp dụng bản vá!**\n\nCommit mới đã được đẩy lên. Một workflow build mới sẽ được tự động kích hoạt trong repo con. Hãy theo dõi kết quả.")
+        file_to_patch = fix_suggestion.get("file_to_patch")
+        if file_to_patch and file_to_patch in files_content_map:
+            current_sha = files_content_map[file_to_patch][1]
+            if not current_sha: raise ValueError(f"Không tìm thấy SHA của file cần vá: {file_to_patch}")
+            
+            commit_message = f"{fix_suggestion['commit_message']} (AI Auto-Fix Attempt #{DEBUG_ATTEMPT})"
+            apply_patch(repo_to_fix, file_to_patch, fix_suggestion["corrected_code"], commit_message, current_sha)
+            
+            post_issue_comment(f"🎉 **Đã áp dụng bản vá tự động (Lần #{DEBUG_ATTEMPT})!**\n\n- **Phân tích:** {fix_suggestion['analysis']}\n- **Commit:** `{commit_message}`\n\nMột build mới sẽ được tự động kích hoạt trong repo `{repo_to_fix}`.")
+        else:
+            post_issue_comment(f"**Phân tích của AI:** {fix_suggestion.get('analysis', 'Không có.')}\n\nAI cho rằng không thể sửa lỗi tự động. Cần sự can thiệp của con người.")
 
     except Exception as e:
-        import traceback
         error_trace = traceback.format_exc()
-        error_message = f"❌ **Debugger đã gặp lỗi nghiêm trọng:**\n\n**Lỗi:**\n```\n{e}\n```\n\n**Traceback:**\n```\n{error_trace}\n```"
+        error_message = f"❌ **[Debugger] Đã xảy ra lỗi:**\n\n**Lỗi:**\n```{e}```\n\n**Traceback:**\n```{error_trace}```"
         post_issue_comment(error_message)
         sys.exit(1)
