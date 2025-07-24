@@ -1,0 +1,26 @@
+name: AI Auto-Debugger
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  debug-and-fix:
+    if: contains(github.event.issue.labels.*.name, 'bug-report')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.10' }
+      - run: pip install google-generativeai requests
+
+      - name: Run AI Debugger Script
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GH_USER: ${{ secrets.GH_USER }}
+          COMMIT_EMAIL: ${{ secrets.COMMIT_EMAIL }}
+          COMMIT_NAME: "AI Debugger Bot"
+        run: python .github/scripts/debugger.py

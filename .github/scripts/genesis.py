@@ -16,7 +16,7 @@ try:
     ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-    GITHUB_TOKEN = os.environ["GITHUB_TOKEN"] # Đây là GH_PAT
+    GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
     REPO_OWNER = os.environ["GH_USER"]
     COMMIT_EMAIL = os.environ["COMMIT_EMAIL"]
     COMMIT_NAME = os.environ["COMMIT_NAME"]
@@ -31,19 +31,7 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 FLUTTER_WORKFLOW_CONTENT = r"""
 name: Build and Self-Heal Flutter App
-on:
-  push:
-    branches: [ main ]
-  workflow_dispatch:
-    inputs:
-      failed_run_id:
-        description: 'ID of the failed workflow run to debug'
-        required: false
-      debug_attempt:
-        description: 'Number of debug attempts'
-        required: false
-        default: '1'
-
+on: [push, workflow_dispatch]
 jobs:
   build:
     if: github.event_name == 'push'
@@ -67,9 +55,7 @@ jobs:
         id: build_step
         run: flutter build apk --release
       - uses: actions/upload-artifact@v4
-        with:
-          name: release-apk
-          path: build/app/outputs/flutter-apk/app-release.apk
+        with: { name: release-apk, path: build/app/outputs/flutter-apk/app-release.apk }
       - name: Trigger Self-Healing on Failure
         if: failure()
         uses: actions/github-script@v7
@@ -83,8 +69,7 @@ jobs:
               ref: 'main',
               inputs: {
                 failed_run_id: `${{ github.run_id }}`,
-                repo_to_fix: '${{ github.repository }}',
-                debug_attempt: '1'
+                repo_to_fix: '${{ github.repository }}'
               }
             });
 """
@@ -92,6 +77,7 @@ jobs:
 # ==============================================================================
 # II. CÁC HÀM TIỆN ÍCH
 # ==============================================================================
+
 def post_issue_comment(message):
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
     requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
@@ -109,14 +95,47 @@ def parse_issue_body(body):
     final_params['prompt'] = final_params['prompt'].replace("```text", "").replace("```", "").strip()
     return final_params
 
-def call_gemini_for_code(user_prompt, language, model_name):
-    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) để tạo code ---")
+def _call_gemini_raw(prompt, model_name):
     model = genai.GenerativeModel(model_name)
-    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh, sẵn sàng để build. Trả về dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
-    response = model.generate_content(final_prompt, request_options={'timeout': 300})
-    match = re.search(r'\{.*\}', response.text, re.DOTALL)
-    if not match: raise ValueError(f"AI không trả về JSON hợp lệ. Phản hồi thô:\n{response.text}")
-    return json.loads(match.group(0), strict=False)
+    response = model.generate_content(prompt, request_options={'timeout': 300})
+    return response.text
+
+def extract_and_clean_json(text):
+    print("--- 🧠 Đang trích xuất và dọn dẹp JSON ---")
+    match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+    if not match: match = re.search(r'\{.*\}', text, re.DOTALL)
+    if not match: raise ValueError("Không tìm thấy đối tượng JSON hợp lệ trong phản hồi.")
+    json_str = match.group(0).replace("```json", "").replace("```", "").strip()
+    json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
+    return json_str
+
+def call_gemini_for_code(user_prompt, language, model_name):
+    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) - Lần thử 1 ---")
+    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh. Trả về dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
+    raw_response = ""
+    json_str = ""
+    try:
+        raw_response = _call_gemini_raw(final_prompt, model_name)
+        json_str = extract_and_clean_json(raw_response)
+        parsed_json = json.loads(json_str)
+        print("   - ✅ AI đã tạo code và JSON hợp lệ ngay lần đầu.")
+        return parsed_json
+    except (json.JSONDecodeError, ValueError) as e:
+        post_issue_comment(f"⚠️ **Cảnh báo:** AI đã trả về JSON không hợp lệ (Lỗi: {e}). Bắt đầu vòng lặp tự sửa lỗi...")
+        repair_prompt = f"Phản hồi trước của bạn đã gây ra lỗi parse JSON. LỖI: {e}\nCHUỖI JSON BỊ LỖI:\n---\n{json_str or raw_response}\n---\nNHIỆM VỤ: Hãy sửa lại CHUỖI JSON trên để nó hoàn toàn hợp lệ. Chỉ trả về DUY NHẤT khối JSON đã được sửa."
+        print(f"--- [Genesis] Đang gọi AI ({model_name}) - Lần thử 2 (Sửa lỗi) ---")
+        repaired_response = ""
+        try:
+            repaired_response = _call_gemini_raw(repair_prompt, model_name)
+            repaired_json_str = extract_and_clean_json(repaired_response)
+            parsed_json = json.loads(repaired_json_str)
+            print("   - ✅ AI đã tự sửa lỗi JSON thành công.")
+            post_issue_comment("✅ **Thông tin:** Vòng lặp tự sửa lỗi JSON đã thành công.")
+            return parsed_json
+        except Exception as final_e:
+            raise Exception(f"AI không thể tự sửa lỗi JSON.\nLỗi cuối cùng: {final_e}\nPhản hồi sửa lỗi thô: {repaired_response}")
+    except Exception as e:
+        raise e
 
 def create_and_commit_project(repo_name, file_tree):
     print(f"--- [Genesis] Bước 4: Đang tạo repo và commit file ---")
@@ -153,12 +172,20 @@ if __name__ == "__main__":
         file_tree = call_gemini_for_code(user_prompt, language, ai_model)
         
         if language.lower() == 'flutter':
-            file_tree[".github/workflows/build.yml"] = FLUTTER_WORKFLOW_CONTENT
+            print("   - Dự án Flutter, đang thêm workflow build APK...")
+            file_tree[".github/workflows/build_and_release.yml"] = FLUTTER_WORKFLOW_CONTENT
             post_issue_comment("⚙️ Đã thêm workflow tự động build và tự sửa lỗi.")
         
         create_and_commit_project(repo_name, file_tree)
         
-        success_message = f"🎉 **Dự án `{repo_name}` đã được tạo thành công!**\n\n- **Link:** https://github.com/{REPO_OWNER}/{repo_name}\n- **Lưu ý:** Hãy vào repo mới, mục `Settings > Secrets` để thêm các secret cần thiết cho việc build APK, đặc biệt là `GH_PAT_FOR_FACTORY` (dán chính PAT của `ai-factory`)."
+        success_message = f"""
+        🎉 **Dự án `{repo_name}` đã được tạo thành công!**
+
+        - **Link Repository:** https://github.com/{REPO_OWNER}/{repo_name}
+        - **Hành động tiếp theo:**
+          1. **Thêm Secrets:** Để workflow build APK hoạt động, bạn cần vào repo mới, đi tới `Settings > Secrets and variables > Actions` và thêm các secret `RELEASE_KEYSTORE_BASE64`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`, và **quan trọng là `GH_PAT_FOR_FACTORY`** (dán chính PAT của `ai-factory`).
+          2. **Kích hoạt Workflow:** Workflow sẽ tự chạy sau khi được commit.
+        """
         post_issue_comment(success_message)
         
     except Exception as e:

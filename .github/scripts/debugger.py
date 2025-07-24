@@ -15,20 +15,14 @@ import traceback
 # ==============================================================================
 print("--- 🤖 AI Auto-Debugger v1.0 Initializing ---")
 try:
-    ISSUE_BODY = os.environ.get("ISSUE_BODY", "") # Lấy từ trigger issue
+    ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
-    
-    # Lấy từ trigger workflow_dispatch
-    REPO_TO_FIX = os.environ.get("REPO_TO_FIX")
-    FAILED_RUN_ID = os.environ.get("FAILED_RUN_ID")
-    DEBUG_ATTEMPT = int(os.environ.get("DEBUG_ATTEMPT", 1))
-    
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
     GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
     REPO_OWNER = os.environ["GH_USER"]
     COMMIT_EMAIL = os.environ["COMMIT_EMAIL"]
     COMMIT_NAME = os.environ["COMMIT_NAME"]
-except (KeyError, ValueError) as e:
+except KeyError as e:
     print(f"❌ LỖI: Thiếu biến môi trường: {e}")
     sys.exit(1)
 
@@ -36,14 +30,14 @@ COMMIT_AUTHOR = {"name": COMMIT_NAME, "email": COMMIT_EMAIL}
 API_BASE_URL = "https://api.github.com"
 HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 genai.configure(api_key=GEMINI_API_KEY)
-MAX_DEBUG_ATTEMPTS = 3
 
 # ==============================================================================
 # II. CÁC HÀM TIỆN ÍCH
 # ==============================================================================
+
 def post_issue_comment(message):
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-    requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
+    requests.post(url, headers=HEADERS, json={"body": message})
 
 def parse_bug_report(body):
     print("--- 🕵️  Đang phân tích báo cáo lỗi ---")
@@ -58,17 +52,17 @@ def parse_bug_report(body):
 def get_failed_job_log(repo_name, run_id):
     print(f"--- 📥 Đang tải log lỗi từ Run ID: {run_id} ---")
     logs_url = f"{API_BASE_URL}/repos/{repo_name}/actions/runs/{run_id}/logs"
-    for i in range(3): # Thử lại 3 lần
+    for _ in range(3):
         response = requests.get(logs_url, headers=HEADERS, stream=True, timeout=60)
-        if response.status_code == 200: break
-        print(f"Log chưa sẵn sàng, đợi 10 giây... (lần {i+1})")
+        if response.status_code == 200:
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                log_file_name = next((name for name in z.namelist() if 'build' in name and name.endswith('.txt')), z.namelist()[0])
+                with z.open(log_file_name) as f:
+                    log_content = f.read().decode('utf-8', errors='ignore')
+            return "\n".join(log_content.splitlines()[-200:])
+        print(f"Log chưa sẵn sàng (status: {response.status_code}), đợi 10 giây...")
         time.sleep(10)
-    response.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-        log_file_name = next((name for name in z.namelist() if 'build' in name and name.endswith('.txt')), z.namelist()[0])
-        with z.open(log_file_name) as f:
-            log_content = f.read().decode('utf-8', errors='ignore')
-    return "\n".join(log_content.splitlines()[-200:])
+    raise Exception("Không thể tải log lỗi sau nhiều lần thử.")
 
 def get_file_content(repo_name, file_path):
     print(f"--- 📄 Đang đọc nội dung file: {file_path} ---")
@@ -95,26 +89,13 @@ def apply_patch(repo_name, file_path, new_content, commit_message, current_sha):
     requests.put(url, headers=HEADERS, json=data).raise_for_status()
     print("   - ✅ Bản vá đã được commit!")
 
-def re_trigger_fix(repo_to_fix, failed_run_id, next_attempt):
-     print(f"--- 🔁 Đang kích hoạt lại vòng sửa lỗi (lần {next_attempt}) ---")
-     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/actions/workflows/auto_debugger.yml/dispatches"
-     data = {'ref': 'main', 'inputs': {'failed_run_id': failed_run_id, 'repo_to_fix': repo_to_fix, 'debug_attempt': str(next_attempt)}}
-     requests.post(url, headers=HEADERS, json=data).raise_for_status()
-     
 # ==============================================================================
 # III. HÀM THỰC THI CHÍNH
 # ==============================================================================
 if __name__ == "__main__":
     try:
-        repo_to_fix, failed_run_id = REPO_TO_FIX, FAILED_RUN_ID
-        if not repo_to_fix or not failed_run_id: # Lấy từ issue nếu trigger thủ công bị thiếu
-             repo_to_fix, failed_run_id = parse_bug_report(ISSUE_BODY)
-
-        post_issue_comment(f"✅ **AI Debugger đã bắt đầu làm việc** trên repo `{repo_to_fix}` (Lần thử #{DEBUG_ATTEMPT}).")
-        
-        if DEBUG_ATTEMPT > MAX_DEBUG_ATTEMPTS:
-            post_issue_comment(f"🚨 Đã đạt giới hạn {MAX_DEBUG_ATTEMPTS} lần sửa lỗi. Dừng lại.")
-            sys.exit(1)
+        repo_to_fix, failed_run_id = parse_bug_report(ISSUE_BODY)
+        post_issue_comment(f"✅ **AI Debugger đã bắt đầu làm việc** trên repo `{repo_to_fix}`.")
         
         log = get_failed_job_log(repo_to_fix, failed_run_id)
         
@@ -128,10 +109,10 @@ if __name__ == "__main__":
             current_sha = files_content_map[file_to_patch][1]
             if not current_sha: raise ValueError(f"Không tìm thấy SHA của file cần vá: {file_to_patch}")
             
-            commit_message = f"{fix_suggestion['commit_message']} (AI Auto-Fix Attempt #{DEBUG_ATTEMPT})"
+            commit_message = f"fix(ai): {fix_suggestion['commit_message']}"
             apply_patch(repo_to_fix, file_to_patch, fix_suggestion["corrected_code"], commit_message, current_sha)
             
-            post_issue_comment(f"🎉 **Đã áp dụng bản vá tự động (Lần #{DEBUG_ATTEMPT})!**\n\n- **Phân tích:** {fix_suggestion['analysis']}\n- **Commit:** `{commit_message}`\n\nMột build mới sẽ được tự động kích hoạt trong repo `{repo_to_fix}`.")
+            post_issue_comment(f"🎉 **Đã áp dụng bản vá tự động!**\n\n- **Phân tích:** {fix_suggestion['analysis']}\n- **Commit:** `{commit_message}`\n\nMột build mới sẽ được tự động kích hoạt trong repo `{repo_to_fix}`.")
         else:
             post_issue_comment(f"**Phân tích của AI:** {fix_suggestion.get('analysis', 'Không có.')}\n\nAI cho rằng không thể sửa lỗi tự động. Cần sự can thiệp của con người.")
 
