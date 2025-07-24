@@ -29,9 +29,6 @@ API_BASE_URL = "https://api.github.com"
 HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
 genai.configure(api_key=GEMINI_API_KEY)
 
-# WORKFLOW ĐÃ ĐƯỢC SỬA LỖI TẠO PROJECT VÀ BÁO CÁO LỖI
-# Trong file .github/scripts/genesis.py
-
 FLUTTER_WORKFLOW_CONTENT = r"""
 name: Build and Self-Heal Flutter App
 on: [push, workflow_dispatch]
@@ -48,19 +45,20 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: 'stable' }
 
-      # === LOGIC SỬA LỖI #1: ĐẢM BẢO CẤU TRÚC CHUẨN ===
       - name: Ensure Valid Project Structure
         run: |
-          # Di chuyển code của AI vào thư mục tạm
-          mkdir ai_code
-          mv lib pubspec.yaml ai_code/
+          # Di chuyển code của AI vào thư mục tạm nếu chúng tồn tại
+          mkdir -p ai_code
+          if [ -d "lib" ]; then mv lib ai_code/; fi
+          if [ -f "pubspec.yaml" ]; then mv pubspec.yaml ai_code/; fi
           
-          # Tạo một dự án Flutter chuẩn hoàn toàn mới
+          # Tạo một dự án Flutter chuẩn hoàn toàn mới.
+          # Lệnh này sẽ thành công vì tên repo đã được chuẩn hóa.
           flutter create .
           
           # Chép đè code của AI vào cấu trúc chuẩn
-          cp -r ai_code/lib .
-          cp ai_code/pubspec.yaml .
+          if [ -d "ai_code/lib" ]; then cp -r ai_code/lib .; fi
+          if [ -f "ai_code/pubspec.yaml" ]; then cp ai_code/pubspec.yaml .; fi
       
       - name: Install Dependencies
         run: flutter pub get
@@ -81,12 +79,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: release-apk, path: build/app/outputs/flutter-apk/app-release.apk }
 
-      # === LOGIC SỬA LỖI #2: CUNG CẤP TOKEN CHO VIỆC BÁO LỖI ===
       - name: Report Build Failure via Issue
         if: failure()
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GH_PAT_FOR_FACTORY }} # <-- ĐÃ THÊM DÒNG QUAN TRỌNG
+          github-token: ${{ secrets.GH_PAT_FOR_FACTORY }}
           script: |
             const run_url = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
             await github.rest.issues.create({
@@ -114,8 +111,17 @@ def parse_issue_body(body):
         key = match.group(1).strip().lower().replace(' ', '_').replace('(', '').replace(')', '')
         value = match.group(2).strip()
         params[key] = value
+        
     final_params = {"repo_name": params.get("new_repository_name"), "language": params.get("language_or_framework"), "ai_model": params.get("gemini_model"), "prompt": params.get("detailed_prompt_the_blueprint")}
     if not all(final_params.values()): raise ValueError(f"Không thể phân tích đủ thông tin từ Issue. Thiếu: {[k for k, v in final_params.items() if not v]}")
+
+    # CHUẨN HÓA TÊN REPO ĐỂ TRÁNH LỖI BUILD
+    original_repo_name = final_params['repo_name']
+    sanitized_repo_name = re.sub(r'[^a-z0-9\-_.]+', '', original_repo_name.lower())
+    if not sanitized_repo_name: sanitized_repo_name = f"ai-app-{int(time.time())}"
+    final_params['repo_name'] = sanitized_repo_name
+    print(f"   - Tên repo gốc: '{original_repo_name}' -> Đã chuẩn hóa: '{sanitized_repo_name}'")
+    
     final_params['prompt'] = final_params['prompt'].replace("```text", "").replace("```", "").strip()
     return final_params
 
