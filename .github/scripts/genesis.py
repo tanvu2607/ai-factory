@@ -30,6 +30,8 @@ HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd
 genai.configure(api_key=GEMINI_API_KEY)
 
 # WORKFLOW ĐÃ ĐƯỢC SỬA LỖI TẠO PROJECT VÀ BÁO CÁO LỖI
+# Trong file .github/scripts/genesis.py
+
 FLUTTER_WORKFLOW_CONTENT = r"""
 name: Build and Self-Heal Flutter App
 on: [push, workflow_dispatch]
@@ -46,20 +48,19 @@ jobs:
       - uses: subosito/flutter-action@v2
         with: { channel: 'stable' }
 
-      - name: Create a Standard Flutter Project in a temporary directory
-        run: flutter create temp_project
-
-      - name: Overwrite Standard Project with AI Code
+      # === LOGIC SỬA LỖI #1: ĐẢM BẢO CẤU TRÚC CHUẨN ===
+      - name: Ensure Valid Project Structure
         run: |
-          # Copy AI's pubspec and lib files over the standard ones
-          # This ensures the project structure is always valid.
-          if [ -f "pubspec.yaml" ]; then cp pubspec.yaml temp_project/pubspec.yaml; fi
-          if [ -d "lib" ]; then rm -rf temp_project/lib && cp -r lib temp_project/lib; fi
+          # Di chuyển code của AI vào thư mục tạm
+          mkdir ai_code
+          mv lib pubspec.yaml ai_code/
           
-          # Now, replace the current directory content with the merged project
-          # This is a safer way to handle the replacement
-          rsync -a --remove-source-files temp_project/ .
-          rm -rf temp_project
+          # Tạo một dự án Flutter chuẩn hoàn toàn mới
+          flutter create .
+          
+          # Chép đè code của AI vào cấu trúc chuẩn
+          cp -r ai_code/lib .
+          cp ai_code/pubspec.yaml .
       
       - name: Install Dependencies
         run: flutter pub get
@@ -80,11 +81,12 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: release-apk, path: build/app/outputs/flutter-apk/app-release.apk }
 
+      # === LOGIC SỬA LỖI #2: CUNG CẤP TOKEN CHO VIỆC BÁO LỖI ===
       - name: Report Build Failure via Issue
         if: failure()
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GH_PAT_FOR_FACTORY }}
+          github-token: ${{ secrets.GH_PAT_FOR_FACTORY }} # <-- ĐÃ THÊM DÒNG QUAN TRỌNG
           script: |
             const run_url = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
             await github.rest.issues.create({
