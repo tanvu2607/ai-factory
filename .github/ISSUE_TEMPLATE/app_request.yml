@@ -25,7 +25,7 @@ body:
     id: ai_model
     attributes:
       label: Gemini Model
-      description: Choose the AI brain to generate the code.
+      description: Choose the AI brain for code generation.
       options:
         - gemini-1.5-flash-latest
         - gemini-1.5-pro-latest

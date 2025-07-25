@@ -1,0 +1,44 @@
+name: Issue Trigger for AI Factory
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  trigger-main-workflow:
+    if: "!contains(github.event.issue.labels.*.name, 'bug-report')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Main AI Project Builder Workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            const issueBody = `${{ github.event.issue.body }}`;
+            
+            function parseInput(label) {
+              const regex = new RegExp(`### ${label}\\s*\\n\\s*(.*?)\\s*(?=\\n###|$)`, "s");
+              const match = issueBody.match(regex);
+              return match ? match[1].trim() : '';
+            }
+
+            const repo_name = parseInput('New Repository Name');
+            const language = parseInput('Language or Framework');
+            const ai_model = parseInput('Gemini Model');
+            const prompt = parseInput('Detailed Prompt \\(The Blueprint\\)');
+
+            console.log(`Triggering main workflow for new repo: ${repo_name}`);
+            
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'main.yml',
+              ref: 'main',
+              inputs: {
+                repo_name: repo_name,
+                language: language,
+                ai_model: ai_model,
+                prompt: prompt,
+                issue_number: `${{ github.event.issue.number }}`
+              }
+            });

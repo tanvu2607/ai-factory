@@ -8,10 +8,8 @@ import requests
 import google.generativeai as genai
 import traceback
 
-# ==============================================================================
-# I. CẤU HÌNH VÀ LẤY BIẾN MÔI TRƯỜNG
-# ==============================================================================
-print("--- [Genesis] Bước 1: Đang tải cấu hình ---")
+# I. CẤU HÌNH
+print("--- Bước 1: Đang tải cấu hình ---")
 try:
     ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ["ISSUE_NUMBER"]
@@ -30,39 +28,18 @@ HEADERS = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd
 genai.configure(api_key=GEMINI_API_KEY)
 
 FLUTTER_WORKFLOW_CONTENT = r"""
-name: Build and Self-Heal Flutter App
+name: Build and Release Flutter APK
 on: [push, workflow_dispatch]
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout AI Generated Code
-        uses: actions/checkout@v4
-
-      - name: Set up Java and Flutter
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with: { java-version: '17', distribution: 'temurin' }
       - uses: subosito/flutter-action@v2
         with: { channel: 'stable' }
-
-      - name: Ensure Valid Project Structure
-        run: |
-          # Di chuyển code của AI vào thư mục tạm nếu chúng tồn tại
-          mkdir -p ai_code
-          if [ -d "lib" ]; then mv lib ai_code/; fi
-          if [ -f "pubspec.yaml" ]; then mv pubspec.yaml ai_code/; fi
-          
-          # Tạo một dự án Flutter chuẩn hoàn toàn mới.
-          # Lệnh này sẽ thành công vì tên repo đã được chuẩn hóa.
-          flutter create .
-          
-          # Chép đè code của AI vào cấu trúc chuẩn
-          if [ -d "ai_code/lib" ]; then cp -r ai_code/lib .; fi
-          if [ -f "ai_code/pubspec.yaml" ]; then cp ai_code/pubspec.yaml .; fi
-      
-      - name: Install Dependencies
-        run: flutter pub get
-
+      - run: flutter pub get
       - name: Decode Keystore and Create Properties
         run: |
           mkdir -p android/app
@@ -71,105 +48,72 @@ jobs:
           echo "keyPassword=${{ secrets.RELEASE_KEY_PASSWORD }}" >> android/key.properties
           echo "keyAlias=${{ secrets.RELEASE_KEY_ALIAS }}" >> android/key.properties
           echo "storeFile=../app/upload-keystore.jks" >> android/key.properties
-
       - name: Build APK
-        id: build_step
         run: flutter build apk --release
-
       - uses: actions/upload-artifact@v4
         with: { name: release-apk, path: build/app/outputs/flutter-apk/app-release.apk }
-
-      - name: Report Build Failure via Issue
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_PAT_FOR_FACTORY }}
-          script: |
-            const run_url = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
-            await github.rest.issues.create({
-              owner: '${{ github.repository_owner }}',
-              repo: 'ai-factory',
-              title: `Build Failed for ${{ github.repository }}`,
-              body: `### 🚨 Build Failure Report\n\n- **Repo:** `${{ github.repository }}`\n- **Run URL:** ${run_url}`,
-              labels: ['bug-report', 'auto-generated']
-            });
 """
 
-# ==============================================================================
 # II. CÁC HÀM TIỆN ÍCH
-# ==============================================================================
-
 def post_issue_comment(message):
+    print(f"--- 💬 Phản hồi lên Issue #{ISSUE_NUMBER} ---")
     url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
-    requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
+    try:
+        requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
+    except requests.exceptions.RequestException as e:
+        print(f"⚠️ Cảnh báo: Không thể comment. Lỗi: {e}")
 
 def parse_issue_body(body):
-    print("--- [Genesis] Bước 2: Đang phân tích yêu cầu ---")
+    print("--- Bước 2: Đang phân tích yêu cầu ---")
     params = {}
     pattern = re.compile(r"### (.*?)\s*\n\s*(.*?)\s*(?=\n###|$)", re.DOTALL)
     for match in pattern.finditer(body):
         key = match.group(1).strip().lower().replace(' ', '_').replace('(', '').replace(')', '')
         value = match.group(2).strip()
         params[key] = value
-        
-    final_params = {"repo_name": params.get("new_repository_name"), "language": params.get("language_or_framework"), "ai_model": params.get("gemini_model"), "prompt": params.get("detailed_prompt_the_blueprint")}
-    if not all(final_params.values()): raise ValueError(f"Không thể phân tích đủ thông tin từ Issue. Thiếu: {[k for k, v in final_params.items() if not v]}")
-
-    # CHUẨN HÓA TÊN REPO ĐỂ TRÁNH LỖI BUILD
-    original_repo_name = final_params['repo_name']
-    sanitized_repo_name = re.sub(r'[^a-z0-9\-_.]+', '', original_repo_name.lower())
-    if not sanitized_repo_name: sanitized_repo_name = f"ai-app-{int(time.time())}"
-    final_params['repo_name'] = sanitized_repo_name
-    print(f"   - Tên repo gốc: '{original_repo_name}' -> Đã chuẩn hóa: '{sanitized_repo_name}'")
-    
-    final_params['prompt'] = final_params['prompt'].replace("```text", "").replace("```", "").strip()
+    final_params = { "repo_name": params.get("new_repository_name"), "language": params.get("language_or_framework"), "ai_model": params.get("gemini_model"), "prompt": params.get("detailed_prompt_the_blueprint") }
+    if not all(final_params.values()): raise ValueError(f"Không thể phân tích đủ thông tin. Thiếu: {[k for k, v in final_params.items() if not v]}")
+    print(f"   - ✅ Phân tích thành công. Repo mới: {final_params['repo_name']}")
     return final_params
 
-def _call_gemini_raw(prompt, model_name):
-    model = genai.GenerativeModel(model_name)
-    response = model.generate_content(prompt, request_options={'timeout': 300})
-    return response.text
-
-def extract_and_clean_json(text):
-    print("--- 🧠 Đang trích xuất và dọn dẹp JSON ---")
-    match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if not match: match = re.search(r'\{.*\}', text, re.DOTALL)
-    if not match: raise ValueError("Không tìm thấy đối tượng JSON hợp lệ trong phản hồi.")
-    json_str = match.group(0).replace("```json", "").replace("```", "").strip()
-    json_str = re.sub(r',\s*([\}\]])', r'\1', json_str)
-    return json_str
-
 def call_gemini_for_code(user_prompt, language, model_name):
-    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) - Lần thử 1 ---")
-    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh. Trả về dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
-    raw_response = ""
-    json_str = ""
+    print(f"--- Bước 3: Đang gọi AI ({model_name}) để tạo code ---")
+    model = genai.GenerativeModel(model_name)
+    final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy thiết kế và viết code hoàn chỉnh cho một dự án. Trả về toàn bộ cấu trúc dự án dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
+    response = model.generate_content(final_prompt, request_options={'timeout': 300})
+    match = re.search(r'```json\s*(\{.*?\})\s*```', response.text, re.DOTALL)
+    if not match: match = re.search(r'\{.*\}', response.text, re.DOTALL)
+    if not match: raise ValueError(f"AI không trả về JSON hợp lệ. Phản hồi thô:\n{response.text}")
+    print("   - ✅ AI đã tạo code thành công.")
+    return json.loads(match.group(0), strict=False)
+
+def call_gemini_for_readme(user_prompt, repo_name, language, file_tree):
+    print("--- Bước 4: Đang gọi AI để tự động viết README.md ---")
+    model = genai.GenerativeModel("gemini-1.5-flash-latest")
+    tree_summary = "\n".join(file_tree.keys())
+    readme_prompt = f"Bạn là một nhà văn kỹ thuật. Dựa trên thông tin sau:\n- Tên Repo: {repo_name}\n- Công nghệ: {language}\n- Yêu cầu: \"{user_prompt}\"\n- Cấu trúc file:\n{tree_summary}\nHãy viết một file README.md chuyên nghiệp với các mục: Giới thiệu, Tính năng, Công nghệ, Hướng dẫn Bắt đầu. Chỉ trả về nội dung Markdown thô."
     try:
-        raw_response = _call_gemini_raw(final_prompt, model_name)
-        json_str = extract_and_clean_json(raw_response)
-        parsed_json = json.loads(json_str)
-        print("   - ✅ AI đã tạo code và JSON hợp lệ ngay lần đầu.")
-        return parsed_json
-    except (json.JSONDecodeError, ValueError) as e:
-        post_issue_comment(f"⚠️ **Cảnh báo:** AI đã trả về JSON không hợp lệ (Lỗi: {e}). Bắt đầu vòng lặp tự sửa lỗi...")
-        repair_prompt = f"Phản hồi trước của bạn đã gây ra lỗi parse JSON. LỖI: {e}\nCHUỖI JSON BỊ LỖI:\n---\n{json_str or raw_response}\n---\nNHIỆM VỤ: Hãy sửa lại CHUỖI JSON trên để nó hoàn toàn hợp lệ. Chỉ trả về DUY NHẤT khối JSON đã được sửa."
-        print(f"--- [Genesis] Đang gọi AI ({model_name}) - Lần thử 2 (Sửa lỗi) ---")
-        repaired_response = ""
-        try:
-            repaired_response = _call_gemini_raw(repair_prompt, model_name)
-            repaired_json_str = extract_and_clean_json(repaired_response)
-            parsed_json = json.loads(repaired_json_str)
-            print("   - ✅ AI đã tự sửa lỗi JSON thành công.")
-            post_issue_comment("✅ **Thông tin:** Vòng lặp tự sửa lỗi JSON đã thành công.")
-            return parsed_json
-        except Exception as final_e:
-            raise Exception(f"AI không thể tự sửa lỗi JSON.\nLỗi cuối cùng: {final_e}\nPhản hồi sửa lỗi thô: {repaired_response}")
-    except Exception as e:
-        raise e
+        response = model.generate_content(readme_prompt)
+        print("   - ✅ Đã tạo nội dung README.md.")
+        return response.text.strip()
+    except Exception:
+        return f"# {repo_name}\n\nProject generated by AI Factory."
+
+def flatten_file_tree(file_tree, path=''):
+    items = {}
+    for key, value in file_tree.items():
+        new_path = os.path.join(path, key) if path else key
+        if isinstance(value, dict):
+            items.update(flatten_file_tree(value, new_path))
+        else:
+            items[new_path] = value
+    return items
 
 def create_and_commit_project(repo_name, file_tree):
-    print(f"--- [Genesis] Bước 4: Đang tạo repo và commit file ---")
-    requests.post(f"{API_BASE_URL}/user/repos", headers=HEADERS, json={"name": repo_name, "auto_init": True}).raise_for_status()
+    flat_file_tree = flatten_file_tree(file_tree)
+    print(f"--- Bước 5: Đang tạo repo và commit {len(flat_file_tree)} file ---")
+    requests.post(f"{API_BASE_URL}/user/repos", headers=HEADERS, json={"name": repo_name, "private": False, "auto_init": True}).raise_for_status()
+    print("   - Repo đã được tạo. Đợi 5 giây...")
     time.sleep(5)
     
     ref_url = f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/refs/heads/main"
@@ -178,50 +122,32 @@ def create_and_commit_project(repo_name, file_tree):
     base_tree_sha = requests.get(main_ref['object']['url'], headers=HEADERS).json()['tree']['sha']
     
     tree_elements = []
-    for path, content in file_tree.items():
+    for path, content in flat_file_tree.items():
         if not isinstance(content, str): continue
-        blob_sha = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs", headers=HEADERS, json={"content": content, "encoding": "utf-8"}).json()['sha']
-        tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob_sha})
+        blob = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs", headers=HEADERS, json={"content": content, "encoding": "utf-8"}).json()
+        tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob['sha']})
         
-    new_tree_sha = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees", headers=HEADERS, json={"base_tree": base_tree_sha, "tree": tree_elements}).json()['sha']
-    
-    commit_data = {"message": "feat: Initial project structure by AI Factory", "author": COMMIT_AUTHOR, "parents": [latest_commit_sha], "tree": new_tree_sha}
-    new_commit_sha = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits", headers=HEADERS, json=commit_data).json()['sha']
-    
-    requests.patch(ref_url, headers=HEADERS, json={"sha": new_commit_sha}).raise_for_status()
+    new_tree = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/trees", headers=HEADERS, json={"base_tree": base_tree_sha, "tree": tree_elements}).json()
+    new_commit = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/commits", headers=HEADERS, json={"message": "feat: Initial project structure by AI Factory", "author": COMMIT_AUTHOR, "parents": [latest_commit_sha], "tree": new_tree['sha']}).json()
+    requests.patch(ref_url, headers=HEADERS, json={"sha": new_commit['sha']}).raise_for_status()
     print("   - ✅ Đã commit tất cả file thành công!")
 
-# ==============================================================================
 # III. HÀM THỰC THI CHÍNH
-# ==============================================================================
 if __name__ == "__main__":
     try:
         params = parse_issue_body(ISSUE_BODY)
         repo_name, language, ai_model, user_prompt = params.values()
-        
-        post_issue_comment(f"✅ Đã nhận yêu cầu cho repo `{repo_name}`. Bắt đầu gọi AI ({ai_model})...")
-        
+        post_issue_comment(f"✅ Đã nhận yêu cầu. Bắt đầu gọi AI ({ai_model})...")
         file_tree = call_gemini_for_code(user_prompt, language, ai_model)
-        
+        readme_content = call_gemini_for_readme(user_prompt, repo_name, language, flatten_file_tree(file_tree.copy()))
+        file_tree["README.md"] = readme_content
         if language.lower() == 'flutter':
-            print("   - Dự án Flutter, đang thêm workflow build APK...")
-            file_tree[".github/workflows/build_and_release.yml"] = FLUTTER_WORKFLOW_CONTENT
-            post_issue_comment("⚙️ Đã thêm workflow tự động build và tự sửa lỗi.")
-        
+            file_tree[".github/workflows/build.yml"] = FLUTTER_WORKFLOW_CONTENT
+            post_issue_comment("⚙️ Đã thêm workflow build APK.")
         create_and_commit_project(repo_name, file_tree)
-        
-        success_message = f"""
-        🎉 **Dự án `{repo_name}` đã được tạo thành công!**
-
-        - **Link Repository:** https://github.com/{REPO_OWNER}/{repo_name}
-        - **Hành động tiếp theo:**
-          1. **Thêm Secrets:** Để workflow build APK hoạt động, bạn cần vào repo mới, đi tới `Settings > Secrets and variables > Actions` và thêm các secret `RELEASE_KEYSTORE_BASE64`, `RELEASE_KEYSTORE_PASSWORD`, `RELEASE_KEY_ALIAS`, `RELEASE_KEY_PASSWORD`, và **quan trọng là `GH_PAT_FOR_FACTORY`** (dán chính PAT của `ai-factory`).
-          2. **Kích hoạt Workflow:** Workflow sẽ tự chạy sau khi được commit.
-        """
+        success_message = f"🎉 **Dự án `{repo_name}` đã được tạo thành công!**\n- **Link:** https://github.com/{REPO_OWNER}/{repo_name}"
         post_issue_comment(success_message)
-        
     except Exception as e:
-        error_trace = traceback.format_exc()
-        error_message = f"❌ **[Genesis] Đã xảy ra lỗi:**\n\n**Lỗi:**\n```{e}```\n\n**Traceback:**\n```{error_trace}```"
+        error_message = f"❌ **Đã xảy ra lỗi:**\n\n**Lỗi:**\n```{e}```\n\n**Traceback:**\n```{traceback.format_exc()}```"
         post_issue_comment(error_message)
         sys.exit(1)
