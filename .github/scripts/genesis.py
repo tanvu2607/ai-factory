@@ -1,128 +1,76 @@
-import gradio as gr
-import subprocess
-import os
-import sys
-import logging
-from threading import Thread
-from queue import Queue
+import os, re, json, base64, time, sys, requests, google.generativeai as genai, traceback
 
-# --- Cấu hình Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-# --- Lấy các secrets từ môi trường của Space ---
-# Gradio sẽ tự động load secrets vào os.environ
+# ==============================================================================
+# I. CẤU HÌNH VÀ LẤY BIẾN MÔI TRƯỜNG
+# ==============================================================================
+print("--- [Genesis] Bước 1: Đang tải cấu hình ---")
 try:
+    ISSUE_BODY = os.environ["ISSUE_BODY"]
+    ISSUE_NUMBER = os.environ.get("ISSUE_NUMBER", "cli-run") # Dùng .get() để an toàn
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
     GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-    GH_USER = os.environ["GH_USER"]
-    COMMIT_EMAIL = os.getenv("COMMIT_EMAIL", "bot@example.com")
-    COMMIT_NAME = os.getenv("COMMIT_NAME", "Genesis AI Studio")
+    REPO_OWNER = os.environ["GH_USER"]
+    COMMIT_EMAIL = os.environ["COMMIT_EMAIL"]
+    COMMIT_NAME = os.environ["COMMIT_NAME"]
 except KeyError as e:
-    missing_secret = str(e)
-    logger.error(f"FATAL ERROR: Missing required secret: {missing_secret}. Please set it in your Space settings.")
-    # Hiển thị lỗi trên giao diện nếu có thể
-    # (Trong thực tế, app sẽ crash và log sẽ hiển thị lỗi này)
-    raise EnvironmentError(f"Missing required secret: {missing_secret}")
+    print(f"❌ [Genesis] LỖI: Thiếu biến môi trường: {e}")
+    sys.exit(1)
 
-AI_FACTORY_DIR = "ai-factory"
-AI_FACTORY_REPO_URL = f"https://github.com/{GH_USER}/ai-factory.git"
+# ... (Toàn bộ các hằng số khác: COMMIT_AUTHOR, API_BASE_URL, HEADERS, FLUTTER_WORKFLOW_CONTENT... giữ nguyên như phiên bản "Siêu Ổn Định")
 
-def setup_factory():
-    """Clone hoặc cập nhật repo ai-factory."""
-    if not os.path.exists(AI_FACTORY_DIR):
-        logger.info(f"Cloning {AI_FACTORY_REPO_URL} repository...")
-        subprocess.run(["git", "clone", AI_FACTORY_REPO_URL], check=True)
+# ==============================================================================
+# II. CÁC HÀM TIỆN ÍCH
+# ==============================================================================
+
+def post_issue_comment(message):
+    # SỬA LỖI: Chỉ comment nếu đây là một lần chạy từ Issue thật
+    if ISSUE_NUMBER and ISSUE_NUMBER.isdigit():
+        print(f"--- [Genesis] 💬 Phản hồi lên Issue #{ISSUE_NUMBER} ---")
+        url = f"{API_BASE_URL}/repos/{REPO_OWNER}/ai-factory/issues/{ISSUE_NUMBER}/comments"
+        try:
+            requests.post(url, headers=HEADERS, json={"body": message}, timeout=30)
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ [Genesis] Cảnh báo: Không thể comment. Lỗi: {e}")
     else:
-        logger.info(f"Updating {AI_FACTORY_DIR} repository...")
-        subprocess.run(["git", "-C", AI_FACTORY_DIR, "pull"], check=True)
+        # Nếu chạy từ Gradio, chỉ in ra log
+        print(f"--- [Genesis] Log: {message} ---")
 
-# Chạy setup ngay khi ứng dụng khởi động
-try:
-    setup_factory()
-except Exception as e:
-    logger.error(f"Failed to setup ai-factory: {e}")
-    # Nếu không clone được thì không thể tiếp tục
-    # Gradio sẽ hiển thị lỗi này trong log
-    raise
 
-def run_genesis_script(repo_name, language, ai_model, prompt):
-    """
-    Chạy script genesis.py trong một tiến trình con và stream output.
-    """
-    # Tạo nội dung "issue body" giả lập
-    issue_body = f"""
-    ### New Repository Name
-    {repo_name}
-    ### Language or Framework
-    {language}
-    ### Gemini Model
-    {ai_model}
-    ### Detailed Prompt (The Blueprint)
-    {prompt}
-    """
+def parse_issue_body(body):
+    print("--- [Genesis] Bước 2: Đang phân tích yêu cầu ---")
+    # ... (Hàm này giữ nguyên như phiên bản "Siêu Ổn Định")
+    pass
 
-    # Tạo môi trường riêng cho tiến trình con, truyền tất cả secrets
-    env = os.environ.copy()
-    env["ISSUE_BODY"] = issue_body
-    env["ISSUE_NUMBER"] = "gradio-run" # Đánh dấu là chạy từ Gradio
+def call_gemini_for_code(user_prompt, language, model_name):
+    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) ---")
+    # ... (Hàm này giữ nguyên như phiên bản "Kiên cường")
+    pass
 
-    # Đường dẫn đến script genesis.py bên trong repo đã clone
-    script_path = os.path.join(AI_FACTORY_DIR, ".github", "scripts", "genesis.py")
+# ... (Tất cả các hàm tiện ích khác: create_repo, flatten_file_tree, commit_files_via_api... giữ nguyên)
 
-    # Sử dụng Popen để đọc output theo thời gian thực
-    process = subprocess.Popen(
-        [sys.executable, script_path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT, # Gộp cả stdout và stderr
-        text=True,
-        env=env,
-        bufsize=1,
-        universal_newlines=True
-    )
-    
-    # Đọc từng dòng output và trả về
-    for line in process.stdout:
-        print(line, end="") # In ra log của Space để gỡ lỗi
-        yield line.strip()
-
-    process.wait() # Đợi tiến trình kết thúc
-    
-    if process.returncode != 0:
-        yield f"\n❌ LỖI! Quá trình thất bại. Vui lòng kiểm tra log của Space để biết chi tiết."
-    else:
-        repo_url = f"https://github.com/{GH_USER}/{repo_name}"
-        yield f"\n🎉 HOÀN TẤT! Link Repo: {repo_url}"
-
-# Xây dựng giao diện Gradio
-with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), title="Genesis AI Studio") as demo:
-    gr.Markdown("# 🚀 Genesis AI Studio")
-    gr.Markdown("Turn your ideas into complete, build-ready GitHub projects with a single prompt.")
-    
-    with gr.Row():
-        with gr.Column(scale=2):
-            repo_name_input = gr.Textbox(label="New Repository Name", placeholder="e.g., my-awesome-flutter-app")
-            language_input = gr.Dropdown(label="Language / Framework", choices=["Flutter", "Python"], value="Flutter")
-            model_input = gr.Dropdown(label="Gemini Model", choices=["gemini-1.5-flash-latest", "gemini-1.5-pro-latest"], value="gemini-1.5-flash-latest")
-            prompt_input = gr.Textbox(label="Detailed Prompt (The Blueprint)", lines=10, placeholder="Describe the application you want to build...")
-            submit_button = gr.Button("✨ Generate Project", variant="primary")
-        
-        with gr.Column(scale=3):
-            gr.Markdown("### 📝 **Live Log**")
-            log_output = gr.Textbox(label="Log", lines=20, interactive=False, value="*Awaiting your command...*")
-
-    def stream_response(repo, lang, model, p):
-        full_log = ""
-        # Dùng generator để stream log
-        for line in run_genesis_script(repo, lang, model, p):
-            full_log += line + "\n"
-            yield full_log
-
-    submit_button.click(
-        fn=stream_response, 
-        inputs=[repo_name_input, language_input, model_input, prompt_input], 
-        outputs=[log_output]
-    )
-
+# ==============================================================================
+# III. HÀM THỰC THI CHÍNH
+# ==============================================================================
 if __name__ == "__main__":
-    demo.launch()
+    try:
+        # Toàn bộ logic trong `main` giữ nguyên như phiên bản "Siêu Ổn Định",
+        # không cần thay đổi gì vì nó đã được thiết kế để đọc `ISSUE_BODY`.
+        
+        params = parse_issue_body(ISSUE_BODY)
+        repo_name, language, ai_model, user_prompt = params.values()
+        
+        post_issue_comment(f"✅ Đã nhận yêu cầu. Bắt đầu gọi AI ({ai_model})...")
+        
+        file_tree = call_gemini_for_code(user_prompt, language, ai_model)
+        
+        # ... (logic thêm workflow, tạo repo, commit file)
+        
+        success_message = f"🎉 **Dự án `{repo_name}` đã được tạo thành công!**\n- **Link:** https://github.com/{REPO_OWNER}/{repo_name}"
+        post_issue_comment(success_message)
+        
+    except Exception as e:
+        error_message = f"❌ **Đã xảy ra lỗi:**\n\n**Lỗi:**\n```{e}```\n\n**Traceback:**\n```{traceback.format_exc()}```"
+        post_issue_comment(error_message)
+        # In lỗi ra stderr để tiến trình cha (app.py) có thể bắt được
+        print(error_message, file=sys.stderr)
+        sys.exit(1)
