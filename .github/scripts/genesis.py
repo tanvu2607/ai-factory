@@ -7,14 +7,13 @@ import sys
 import requests
 import google.generativeai as genai
 import traceback
-import argparse
 
 # ==============================================================================
 # I. CẤU HÌNH VÀ LẤY BIẾN MÔI TRƯỜNG
 # ==============================================================================
 print("--- [Genesis] Bước 1: Đang tải cấu hình ---")
 try:
-    # ISSUE_NUMBER giờ đây là tùy chọn, được truyền từ CLI
+    ISSUE_BODY = os.environ["ISSUE_BODY"]
     ISSUE_NUMBER = os.environ.get("ISSUE_NUMBER", "cli-run")
     GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
     GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
@@ -72,18 +71,55 @@ def post_issue_comment(message):
     else:
         print(f"--- [Genesis] Log: {message} ---")
 
+def parse_issue_body(body):
+    """Phân tích nội dung của issue, đã được gia cố để chống lỗi."""
+    print("--- [Genesis] Bước 2: Đang phân tích yêu cầu từ Issue ---")
+    print("--- Nội dung thô của Issue Body ---\n" + body + "\n---------------------------------")
+    
+    def find_value(key_label, text):
+        """Hàm helper để trích xuất một giá trị dựa trên label của nó."""
+        # Pattern tìm: ### Key Label\nNội dung... (cho đến khi gặp ### tiếp theo hoặc cuối chuỗi)
+        pattern = re.compile(rf"### {re.escape(key_label)}\s*\n(.*?)(?=\n###|$)", re.DOTALL | re.IGNORECASE)
+        match = pattern.search(text)
+        # strip() để loại bỏ các khoảng trắng và dòng trống thừa
+        return match.group(1).strip() if match else None
+
+    params = {
+        "repo_name": find_value("New Repository Name", body),
+        "language": find_value("Language or Framework", body),
+        "ai_model": find_value("Gemini Model", body),
+        "prompt": find_value("Detailed Prompt (The Blueprint)", body)
+    }
+
+    print("--- Kết quả phân tích ---")
+    print(params)
+    print("-------------------------")
+    
+    # Kiểm tra xem có trường nào bị thiếu không
+    if not all(params.values()):
+        missing = [k for k, v in params.items() if not v]
+        raise ValueError(f"Không thể phân tích đủ thông tin từ Issue. Các trường bị thiếu: {missing}")
+
+    # Dọn dẹp prompt khỏi các thẻ markdown
+    params['prompt'] = params['prompt'].replace("```text", "").replace("```", "").strip()
+    print(f"   - ✅ Phân tích thành công. Repo mới: {params['repo_name']}")
+    return params
+
 def call_gemini_for_code(user_prompt, language, model_name):
-    print(f"--- [Genesis] Bước 2: Đang gọi AI ({model_name}) ---")
+    print(f"--- [Genesis] Bước 3: Đang gọi AI ({model_name}) ---")
     model = genai.GenerativeModel(model_name)
     final_prompt = f'Bạn là một kỹ sư phần mềm chuyên về {language}. Dựa trên yêu cầu: "{user_prompt}", hãy tạo cấu trúc file và thư mục hoàn chỉnh. Trả về dưới dạng một đối tượng JSON lồng nhau duy nhất, bao bọc trong khối ```json ... ```.'
     response = model.generate_content(final_prompt, request_options={'timeout': 300})
+    
     match = re.search(r'```json\s*(\{.*?\})\s*```', response.text, re.DOTALL)
     if not match: match = re.search(r'\{.*\}', response.text, re.DOTALL)
     if not match: raise ValueError(f"AI không trả về JSON hợp lệ. Phản hồi thô:\n{response.text}")
+    
     print("   - ✅ AI đã tạo code thành công.")
     return json.loads(match.group(0), strict=False)
 
 def flatten_file_tree(file_tree, path=''):
+    """Hàm đệ quy để làm phẳng cấu trúc JSON lồng nhau."""
     items = {}
     for key, value in file_tree.items():
         new_path = os.path.join(path, key) if path else key
@@ -94,7 +130,8 @@ def flatten_file_tree(file_tree, path=''):
     return items
 
 def create_and_commit_project(repo_name, file_tree):
-    print(f"--- [Genesis] Bước 3: Đang tạo repo và commit {len(file_tree)} file ---")
+    flat_file_tree = flatten_file_tree(file_tree)
+    print(f"--- [Genesis] Bước 4: Đang tạo repo và commit {len(flat_file_tree)} file ---")
     requests.post(f"{API_BASE_URL}/user/repos", headers=HEADERS, json={"name": repo_name, "private": False, "auto_init": True}).raise_for_status()
     print("   - Repo đã được tạo. Đợi 5 giây...")
     time.sleep(5)
@@ -105,7 +142,7 @@ def create_and_commit_project(repo_name, file_tree):
     base_tree_sha = requests.get(main_ref['object']['url'], headers=HEADERS).json()['tree']['sha']
     
     tree_elements = []
-    for path, content in file_tree.items():
+    for path, content in flat_file_tree.items():
         if not isinstance(content, str): continue
         blob = requests.post(f"{API_BASE_URL}/repos/{REPO_OWNER}/{repo_name}/git/blobs", headers=HEADERS, json={"content": content, "encoding": "utf-8"}).json()
         tree_elements.append({"path": path, "mode": "100644", "type": "blob", "sha": blob['sha']})
@@ -119,24 +156,13 @@ def create_and_commit_project(repo_name, file_tree):
 # III. HÀM THỰC THI CHÍNH
 # ==============================================================================
 if __name__ == "__main__":
-    # === THAY ĐỔI CỐT LÕI: SỬ DỤNG ARGPARSE ĐỂ NHẬN INPUT ===
-    parser = argparse.ArgumentParser(description="AI Genesis Script")
-    parser.add_argument("--repo-name", required=True)
-    parser.add_argument("--language", required=True)
-    parser.add_argument("--model", required=True)
-    parser.add_argument("--prompt", required=True)
-    # issue-number là tùy chọn, sẽ có giá trị "gradio-run" nếu chạy từ Space
-    parser.add_argument("--issue-number", default="cli-run")
-    args = parser.parse_args()
-
-    # Gán các biến từ arguments
-    repo_name = args.repo_name
-    language = args.language
-    ai_model = args.model
-    user_prompt = args.prompt
-    ISSUE_NUMBER = args.issue_number # Cập nhật biến toàn cục
-
     try:
+        params = parse_issue_body(ISSUE_BODY)
+        repo_name = params['repo_name']
+        language = params['language']
+        ai_model = params['ai_model']
+        user_prompt = params['prompt']
+        
         post_issue_comment(f"✅ Đã nhận yêu cầu. Bắt đầu gọi AI ({ai_model})...")
         
         file_tree = call_gemini_for_code(user_prompt, language, ai_model)
@@ -145,8 +171,7 @@ if __name__ == "__main__":
             file_tree[".github/workflows/build.yml"] = FLUTTER_WORKFLOW_CONTENT
             post_issue_comment("⚙️ Đã thêm workflow build APK.")
         
-        flat_file_tree = flatten_file_tree(file_tree)
-        create_and_commit_project(repo_name, flat_file_tree)
+        create_and_commit_project(repo_name, file_tree)
         
         success_message = f"🎉 **Dự án `{repo_name}` đã được tạo thành công!**\n- **Link:** https://github.com/{REPO_OWNER}/{repo_name}"
         post_issue_comment(success_message)
